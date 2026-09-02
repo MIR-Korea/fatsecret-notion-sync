@@ -1,0 +1,36 @@
+name: FatSecret to Notion sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 12 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install --requirement requirements.txt
+
+      - name: Sync recent meals
+        env:
+          FATSECRET_CONSUMER_KEY: ${{ secrets.FATSECRET_CONSUMER_KEY }}
+          FATSECRET_CONSUMER_SECRET: ${{ secrets.FATSECRET_CONSUMER_SECRET }}
+          FATSECRET_ACCESS_TOKEN: ${{ secrets.FATSECRET_ACCESS_TOKEN }}
+          FATSECRET_ACCESS_TOKEN_SECRET: ${{ secrets.FATSECRET_ACCESS_TOKEN_SECRET }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: python sync.py
