@@ -15,7 +15,6 @@ oauth = OAuth1(
     resource_owner_key=os.environ["FATSECRET_ACCESS_TOKEN"],
     resource_owner_secret=os.environ["FATSECRET_ACCESS_TOKEN_SECRET"],
     signature_method="HMAC-SHA1",
-    signature_type="QUERY",
 )
 headers = {
     "Authorization": f"Bearer {os.environ['NOTION_TOKEN']}",
