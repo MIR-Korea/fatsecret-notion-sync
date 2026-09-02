@@ -8,16 +8,29 @@ from requests_oauthlib import OAuth1
 
 FS_URL = "https://platform.fatsecret.com/rest/food-entries/v2"
 NOTION_URL = "https://api.notion.com/v1"
-DB_ID = os.environ["NOTION_DATABASE_ID"]
+
+
+def secret(name):
+    raw = os.environ.get(name, "")
+    value = raw.strip()
+    if raw != value:
+        print(f"{name}: 앞뒤 공백을 제거했습니다.")
+    if not value or any(ch.isspace() for ch in value) or ":" in value:
+        print(f"{name}: 값 형식이 올바르지 않습니다.")
+        raise ValueError(f"{name} 형식 오류")
+    return value
+
+
+DB_ID = secret("NOTION_DATABASE_ID")
 oauth = OAuth1(
-    os.environ["FATSECRET_CONSUMER_KEY"],
-    client_secret=os.environ["FATSECRET_CONSUMER_SECRET"],
-    resource_owner_key=os.environ["FATSECRET_ACCESS_TOKEN"],
-    resource_owner_secret=os.environ["FATSECRET_ACCESS_TOKEN_SECRET"],
+    secret("FATSECRET_CONSUMER_KEY"),
+    client_secret=secret("FATSECRET_CONSUMER_SECRET"),
+    resource_owner_key=secret("FATSECRET_ACCESS_TOKEN"),
+    resource_owner_secret=secret("FATSECRET_ACCESS_TOKEN_SECRET"),
     signature_method="HMAC-SHA1",
 )
 headers = {
-    "Authorization": f"Bearer {os.environ['NOTION_TOKEN']}",
+    "Authorization": f"Bearer {secret('NOTION_TOKEN')}",
     "Notion-Version": "2022-06-28",
     "Content-Type": "application/json",
 }
@@ -90,9 +103,6 @@ def write_page(method, path, body):
 
 def sync_day(day):
     entries = entries_for(day)
-
-    # 빈 응답은 정상적인 빈 기록인지 API 이상인지 구분하기 어려우므로
-    # 안전을 위해 Notion 조회와 수정을 모두 건너뜁니다.
     if not entries:
         print("기록 없음 - 안전하게 건너뜀:", day)
         return 0, 0
