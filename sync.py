@@ -28,7 +28,14 @@ def entries_for(day):
         "date": (day - date(1970, 1, 1)).days, "format": "json"
     }, auth=oauth, timeout=30)
     r.raise_for_status()
-    value = r.json().get("food_entries", {}).get("food_entry", [])
+    data = r.json()
+
+    if data.get("error"):
+        code = data["error"].get("code", "unknown")
+        print("FatSecret API 오류 코드:", code)
+        raise RuntimeError("FatSecret API 오류")
+
+    value = data.get("food_entries", {}).get("food_entry", [])
     return [value] if isinstance(value, dict) else value
 
 
@@ -83,10 +90,16 @@ def write_page(method, path, body):
 
 def sync_day(day):
     entries = entries_for(day)
-    current_ids = {str(entry["food_entry_id"]) for entry in entries}
+
+    # 빈 응답은 정상적인 빈 기록인지 API 이상인지 구분하기 어려우므로
+    # 안전을 위해 Notion 조회와 수정을 모두 건너뜁니다.
+    if not entries:
+        print("기록 없음 - 안전하게 건너뜀:", day)
+        return 0, 0
+
     existing = {fatsecret_id(page): page for page in notion_pages_for(day)
                 if fatsecret_id(page)}
-    added = updated = archived = 0
+    added = updated = 0
 
     for entry in entries:
         entry_id = str(entry["food_entry_id"])
@@ -102,17 +115,11 @@ def sync_day(day):
             added += 1
         time.sleep(0.4)
 
-    for entry_id, page in existing.items():
-        if entry_id not in current_ids:
-            write_page("PATCH", f"/pages/{page['id']}", {"archived": True})
-            archived += 1
-            time.sleep(0.4)
-
-    return added, updated, archived
+    return added, updated
 
 
 def main():
-    totals = [0, 0, 0]
+    totals = [0, 0]
     try:
         for offset in range(6, -1, -1):
             day = date.today() - timedelta(days=offset)
@@ -127,8 +134,7 @@ def main():
             print("HTTP 상태:", exc.response.status_code)
         raise SystemExit(1)
 
-    print(f"완료 - 추가: {totals[0]}, 수정: {totals[1]}, "
-          f"휴지통 이동: {totals[2]}")
+    print(f"완료 - 추가: {totals[0]}, 수정: {totals[1]}")
 
 
 if __name__ == "__main__":
