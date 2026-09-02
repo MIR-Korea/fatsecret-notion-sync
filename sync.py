@@ -48,6 +48,9 @@ def entries_for(day):
         print("FatSecret API 오류 코드:", code)
         raise RuntimeError("FatSecret API 오류")
 
+    if "food_entries" not in data:
+        raise RuntimeError("FatSecret 응답에 food_entries가 없습니다.")
+
     value = data.get("food_entries", {}).get("food_entry", [])
     return [value] if isinstance(value, dict) else value
 
@@ -103,13 +106,16 @@ def write_page(method, path, body):
 
 def sync_day(day):
     entries = entries_for(day)
-    if not entries:
-        print("기록 없음 - 안전하게 건너뜀:", day)
-        return 0, 0
 
+    # 하루 전체가 비어 있으면 API 이상과 구분하기 어려우므로 삭제하지 않습니다.
+    if not entries:
+        print("기록 없음 - 삭제 없이 건너뜀:", day)
+        return 0, 0, 0
+
+    current_ids = {str(entry["food_entry_id"]) for entry in entries}
     existing = {fatsecret_id(page): page for page in notion_pages_for(day)
                 if fatsecret_id(page)}
-    added = updated = 0
+    added = updated = archived = 0
 
     for entry in entries:
         entry_id = str(entry["food_entry_id"])
@@ -125,11 +131,18 @@ def sync_day(day):
             added += 1
         time.sleep(0.4)
 
-    return added, updated
+    # 정상이며 비어 있지 않은 FatSecret 응답일 때만 사라진 ID를 휴지통으로 이동합니다.
+    for entry_id, page in existing.items():
+        if entry_id not in current_ids:
+            write_page("PATCH", f"/pages/{page['id']}", {"archived": True})
+            archived += 1
+            time.sleep(0.4)
+
+    return added, updated, archived
 
 
 def main():
-    totals = [0, 0]
+    totals = [0, 0, 0]
     try:
         for offset in range(6, -1, -1):
             day = date.today() - timedelta(days=offset)
@@ -144,7 +157,8 @@ def main():
             print("HTTP 상태:", exc.response.status_code)
         raise SystemExit(1)
 
-    print(f"완료 - 추가: {totals[0]}, 수정: {totals[1]}")
+    print(f"완료 - 추가: {totals[0]}, 수정: {totals[1]}, "
+          f"휴지통 이동: {totals[2]}")
 
 
 if __name__ == "__main__":
