@@ -2,12 +2,14 @@ import os
 import time
 from datetime import date, timedelta
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 from requests_oauthlib import OAuth1
 
 FS_URL = "https://platform.fatsecret.com/rest/food-entries/v2"
 NOTION_URL = "https://api.notion.com/v1"
+LOCAL_TIMEZONE = ZoneInfo("Asia/Seoul")
 
 
 def secret(name):
@@ -37,9 +39,12 @@ headers = {
 
 
 def entries_for(day):
-    r = requests.get(FS_URL, params={
-        "date": (day - date(1970, 1, 1)).days, "format": "json"
-    }, auth=oauth, timeout=30)
+    r = requests.get(
+        FS_URL,
+        params={"date": (day - date(1970, 1, 1)).days, "format": "json"},
+        auth=oauth,
+        timeout=30,
+    )
     r.raise_for_status()
     data = r.json()
 
@@ -48,23 +53,39 @@ def entries_for(day):
         print("FatSecret API 오류 코드:", code)
         raise RuntimeError("FatSecret API 오류")
 
-    if "food_entries" not in data:
-        raise RuntimeError("FatSecret 응답에 food_entries가 없습니다.")
+    # FatSecret은 기록이 없는 날짜에 food_entries를 생략하거나 null로
+    # 반환할 수 있습니다. 둘 다 정상적인 빈 식단으로 처리합니다.
+    container = data.get("food_entries")
+    if container is None:
+        return []
+    if not isinstance(container, dict):
+        raise RuntimeError("FatSecret food_entries 응답 형식이 올바르지 않습니다.")
 
-    value = data.get("food_entries", {}).get("food_entry", [])
-    return [value] if isinstance(value, dict) else value
+    value = container.get("food_entry")
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return value
+    raise RuntimeError("FatSecret food_entry 응답 형식이 올바르지 않습니다.")
 
 
 def notion_pages_for(day):
     pages, cursor = [], None
     while True:
-        body = {"page_size": 100, "filter": {
-            "property": "Date", "date": {"equals": day.isoformat()}
-        }}
+        body = {
+            "page_size": 100,
+            "filter": {"property": "Date", "date": {"equals": day.isoformat()}},
+        }
         if cursor:
             body["start_cursor"] = cursor
-        r = requests.post(f"{NOTION_URL}/databases/{DB_ID}/query",
-                          headers=headers, json=body, timeout=30)
+        r = requests.post(
+            f"{NOTION_URL}/databases/{DB_ID}/query",
+            headers=headers,
+            json=body,
+            timeout=30,
+        )
         r.raise_for_status()
         data = r.json()
         pages.extend(data.get("results", []))
@@ -74,15 +95,21 @@ def notion_pages_for(day):
 
 
 def fatsecret_id(page):
-    values = page.get("properties", {}).get(
-        "FatSecretID", {}).get("rich_text", [])
+    values = (
+        page.get("properties", {})
+        .get("FatSecretID", {})
+        .get("rich_text", [])
+    )
     return values[0].get("plain_text", "") if values else ""
 
 
 def properties_for(entry, day):
     name = str(entry.get("food_entry_name", "이름 없음"))
-    meal = {"Breakfast": "아침", "Lunch": "점심",
-            "Dinner": "저녁"}.get(str(entry.get("meal", "")), "간식")
+    meal = {
+        "Breakfast": "아침",
+        "Lunch": "점심",
+        "Dinner": "저녁",
+    }.get(str(entry.get("meal", "")), "간식")
     return {
         "Name": {"title": [{"text": {"content": name}}]},
         "Meal": {"select": {"name": meal}},
@@ -92,15 +119,22 @@ def properties_for(entry, day):
         "Protein": {"number": float(entry.get("protein") or 0)},
         "Fat": {"number": float(entry.get("fat") or 0)},
         "Food": {"rich_text": [{"text": {"content": name}}]},
-        "FatSecretID": {"rich_text": [{
-            "text": {"content": str(entry["food_entry_id"])}
-        }]},
+        "FatSecretID": {
+            "rich_text": [
+                {"text": {"content": str(entry["food_entry_id"])}}
+            ]
+        },
     }
 
 
 def write_page(method, path, body):
-    r = requests.request(method, f"{NOTION_URL}{path}",
-                         headers=headers, json=body, timeout=30)
+    r = requests.request(
+        method,
+        f"{NOTION_URL}{path}",
+        headers=headers,
+        json=body,
+        timeout=30,
+    )
     r.raise_for_status()
 
 
@@ -113,21 +147,31 @@ def sync_day(day):
         return 0, 0, 0
 
     current_ids = {str(entry["food_entry_id"]) for entry in entries}
-    existing = {fatsecret_id(page): page for page in notion_pages_for(day)
-                if fatsecret_id(page)}
+    existing = {
+        fatsecret_id(page): page
+        for page in notion_pages_for(day)
+        if fatsecret_id(page)
+    }
     added = updated = archived = 0
 
     for entry in entries:
         entry_id = str(entry["food_entry_id"])
         if entry_id in existing:
-            write_page("PATCH", f"/pages/{existing[entry_id]['id']}",
-                       {"properties": properties_for(entry, day)})
+            write_page(
+                "PATCH",
+                f"/pages/{existing[entry_id]['id']}",
+                {"properties": properties_for(entry, day)},
+            )
             updated += 1
         else:
-            write_page("POST", "/pages", {
-                "parent": {"database_id": DB_ID},
-                "properties": properties_for(entry, day),
-            })
+            write_page(
+                "POST",
+                "/pages",
+                {
+                    "parent": {"database_id": DB_ID},
+                    "properties": properties_for(entry, day),
+                },
+            )
             added += 1
         time.sleep(0.4)
 
@@ -143,9 +187,11 @@ def sync_day(day):
 
 def main():
     totals = [0, 0, 0]
+    today = date.today()
     try:
+        today = __import__("datetime").datetime.now(LOCAL_TIMEZONE).date()
         for offset in range(6, -1, -1):
-            day = date.today() - timedelta(days=offset)
+            day = today - timedelta(days=offset)
             print("확인:", day)
             totals = [a + b for a, b in zip(totals, sync_day(day))]
             time.sleep(0.3)
@@ -157,8 +203,10 @@ def main():
             print("HTTP 상태:", exc.response.status_code)
         raise SystemExit(1)
 
-    print(f"완료 - 추가: {totals[0]}, 수정: {totals[1]}, "
-          f"휴지통 이동: {totals[2]}")
+    print(
+        f"완료 - 추가: {totals[0]}, 수정: {totals[1]}, "
+        f"휴지통 이동: {totals[2]}"
+    )
 
 
 if __name__ == "__main__":
