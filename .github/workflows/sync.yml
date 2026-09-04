@@ -5,7 +5,8 @@ on:
   push:
     branches: ["main"]
   schedule:
-    - cron: "0 0 * * *"
+    # 08:30 Asia/Seoul. Leave a 40-minute buffer before the 09:10 analysis.
+    - cron: "30 23 * * *"
 
 permissions:
   contents: read
