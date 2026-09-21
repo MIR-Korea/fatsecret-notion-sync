@@ -189,19 +189,28 @@ def upsert_summary(day, entries):
 
 def sync_day(day):
     entries = entries_for(day)
+    pages = notion_pages_for(day, RAW_DB_ID, "Date")
 
-    # 빈 응답은 실제 미기록과 API 이상을 구분하기 어려우므로 삭제하지 않습니다.
-    if not entries:
-        print("기록 없음 - 삭제 없이 건너뜀:", day)
-        return 0, 0, 0
+    # FatSecretID를 고유 키로 사용합니다. 과거 중복 행이 있다면
+    # 첫 번째 행만 유지하고 나머지는 휴지통으로 이동합니다.
+    existing = {}
+    duplicate_pages = []
+    for page in pages:
+        entry_id = fatsecret_id(page)
+        if not entry_id:
+            continue
+        if entry_id in existing:
+            duplicate_pages.append(page)
+        else:
+            existing[entry_id] = page
+
+    added = updated = archived = 0
+    for duplicate in duplicate_pages:
+        write_page("PATCH", f"/pages/{duplicate['id']}", {"archived": True})
+        archived += 1
+        time.sleep(0.4)
 
     current_ids = {str(entry["food_entry_id"]) for entry in entries}
-    existing = {
-        fatsecret_id(page): page
-        for page in notion_pages_for(day, RAW_DB_ID, "Date")
-        if fatsecret_id(page)
-    }
-    added = updated = archived = 0
 
     for entry in entries:
         entry_id = str(entry["food_entry_id"])
@@ -224,15 +233,22 @@ def sync_day(day):
             added += 1
         time.sleep(0.4)
 
-    # 정상이며 비어 있지 않은 FatSecret 응답에서 사라진 ID만 휴지통으로 이동합니다.
+    # API가 정상 응답했고 기존 Notion 행이 FatSecret에서 사라졌다면
+    # 해당 행을 휴지통으로 이동합니다. 전체 음식 삭제도 반영됩니다.
     for entry_id, page in existing.items():
         if entry_id not in current_ids:
             write_page("PATCH", f"/pages/{page['id']}", {"archived": True})
             archived += 1
             time.sleep(0.4)
 
-    summary_action = upsert_summary(day, entries)
-    print("일일 요약", summary_action + ":", day)
+    # 음식이 있거나 기존 기록이 삭제된 날만 요약을 갱신합니다.
+    # 전부 삭제된 날은 합계를 0으로 만들어 기존 요약과 일치시킵니다.
+    if entries or existing:
+        summary_action = upsert_summary(day, entries)
+        print("일일 요약", summary_action + ":", day)
+    else:
+        print("기록 없음 - 변경 없음:", day)
+
     return added, updated, archived
 
 
