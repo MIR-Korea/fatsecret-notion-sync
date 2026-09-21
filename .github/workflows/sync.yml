@@ -5,8 +5,12 @@ on:
   push:
     branches: ["main"]
   schedule:
-    # 08:30 Asia/Seoul. Leave a 40-minute buffer before the 09:10 analysis.
-    - cron: "30 23 * * *"
+    # Every 30 minutes. Offset from :00/:30 to reduce GitHub Actions queue delays.
+    - cron: "7,37 * * * *"
+
+concurrency:
+  group: fatsecret-notion-sync
+  cancel-in-progress: true
 
 permissions:
   contents: read
