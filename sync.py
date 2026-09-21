@@ -14,6 +14,7 @@ RAW_DB_ID = None
 SUMMARY_DB_ID = "cb92ef8f87e248d9a405c78f0e9dd306"
 CALORIE_TARGET = 2300.0
 PROTEIN_TARGET = 150.0
+PERSONAL_OS_INGEST_URL = "https://gobpgixochawblszmqob.supabase.co/functions/v1/personal-os-nutrition-ingest"
 
 
 def secret(name):
@@ -154,6 +155,56 @@ def summary_properties_for(entries, day):
     }
 
 
+def nutrition_totals(entries, day):
+    def total(key):
+        return round(sum(float(entry.get(key) or 0) for entry in entries), 2)
+
+    return {
+        "date": day.isoformat(),
+        "calories": total("calories"),
+        "carbs": total("carbohydrate"),
+        "protein": total("protein"),
+        "fat": total("fat"),
+        "food_count": len(entries),
+    }
+
+
+def github_oidc_token():
+    request_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+    request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+    if not request_url or not request_token:
+        raise RuntimeError("GitHub Actions OIDC 환경이 없습니다.")
+
+    separator = "&" if "?" in request_url else "?"
+    response = requests.get(
+        f"{request_url}{separator}audience=personal-os-supabase",
+        headers={"Authorization": f"Bearer {request_token}"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    token = response.json().get("value")
+    if not token:
+        raise RuntimeError("GitHub OIDC 토큰을 받지 못했습니다.")
+    return token
+
+
+def sync_personal_os(days):
+    response = requests.post(
+        PERSONAL_OS_INGEST_URL,
+        headers={
+            "Authorization": f"Bearer {github_oidc_token()}",
+            "Content-Type": "application/json",
+        },
+        json={"days": days},
+        timeout=30,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if not result.get("ok"):
+        raise RuntimeError("Personal OS 동기화 응답이 올바르지 않습니다.")
+    print("Personal OS 동기화:", result.get("upserted", 0), "일")
+
+
 def write_page(method, path, body):
     r = requests.request(
         method,
@@ -249,18 +300,22 @@ def sync_day(day):
     else:
         print("기록 없음 - 변경 없음:", day)
 
-    return added, updated, archived
+    return added, updated, archived, nutrition_totals(entries, day)
 
 
 def main():
     totals = [0, 0, 0]
+    nutrition_days = []
     try:
         today = datetime.now(LOCAL_TIMEZONE).date()
         for offset in range(6, -1, -1):
             day = today - timedelta(days=offset)
             print("확인:", day)
-            totals = [a + b for a, b in zip(totals, sync_day(day))]
+            added, updated, archived, nutrition = sync_day(day)
+            totals = [a + b for a, b in zip(totals, (added, updated, archived))]
+            nutrition_days.append(nutrition)
             time.sleep(0.3)
+        sync_personal_os(nutrition_days)
     except Exception as exc:
         print("동기화 실패: 인증값과 응답 본문은 출력하지 않았습니다.")
         print("오류 종류:", type(exc).__name__)
