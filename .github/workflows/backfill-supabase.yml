@@ -1,0 +1,46 @@
+name: FatSecret Supabase backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: Start date (YYYY-MM-DD)
+        required: false
+        default: "2023-03-28"
+      end_date:
+        description: End date (YYYY-MM-DD); blank means today
+        required: false
+        default: ""
+
+concurrency:
+  group: fatsecret-supabase-backfill
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install --requirement requirements.txt
+      - name: Backfill FatSecret history to Supabase
+        env:
+          FATSECRET_CONSUMER_KEY: ${{ secrets.FATSECRET_CONSUMER_KEY }}
+          FATSECRET_CONSUMER_SECRET: ${{ secrets.FATSECRET_CONSUMER_SECRET }}
+          FATSECRET_ACCESS_TOKEN: ${{ secrets.FATSECRET_ACCESS_TOKEN }}
+          FATSECRET_ACCESS_TOKEN_SECRET: ${{ secrets.FATSECRET_ACCESS_TOKEN_SECRET }}
+        shell: bash
+        run: |
+          args=(--start "${{ inputs.start_date }}")
+          if [[ -n "${{ inputs.end_date }}" ]]; then
+            args+=(--end "${{ inputs.end_date }}")
+          fi
+          python backfill_supabase.py "${args[@]}"
