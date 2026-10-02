@@ -10,7 +10,7 @@ on:
 
 concurrency:
   group: fatsecret-notion-sync
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -32,6 +32,9 @@ jobs:
 
       - name: Install dependencies
         run: pip install --requirement requirements.txt
+
+      - name: Test dual-output synchronization
+        run: python -m unittest -v test_sync
 
       - name: Sync recent meals
         env:

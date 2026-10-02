@@ -1,4 +1,5 @@
 import os
+import math
 import time
 from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
@@ -28,7 +29,6 @@ def secret(name):
     return value
 
 
-RAW_DB_ID = secret("NOTION_DATABASE_ID")
 oauth = OAuth1(
     secret("FATSECRET_CONSUMER_KEY"),
     client_secret=secret("FATSECRET_CONSUMER_SECRET"),
@@ -36,11 +36,55 @@ oauth = OAuth1(
     resource_owner_secret=secret("FATSECRET_ACCESS_TOKEN_SECRET"),
     signature_method="HMAC-SHA1",
 )
-headers = {
-    "Authorization": f"Bearer {secret('NOTION_TOKEN')}",
-    "Notion-Version": "2022-06-28",
-    "Content-Type": "application/json",
-}
+headers = {}
+
+
+def configure_notion():
+    global RAW_DB_ID, headers
+    RAW_DB_ID = secret("NOTION_DATABASE_ID")
+    headers = {"Authorization": f"Bearer {secret('NOTION_TOKEN')}",
+               "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+    expected = {"Name": "title", "Date": "date", "Meal": "select",
+                "Food": "rich_text", "FatSecretID": "rich_text",
+                "Calories": "number", "Carbs": "number", "Protein": "number", "Fat": "number"}
+    r = requests.get(f"{NOTION_URL}/databases/{RAW_DB_ID}", headers=headers, timeout=30)
+    r.raise_for_status()
+    properties = r.json().get("properties", {})
+    if any(properties.get(name, {}).get("type") != kind for name, kind in expected.items()):
+        raise RuntimeError("Notion 음식 DB 스키마가 일치하지 않습니다.")
+
+
+def normalize_entries(entries):
+    """Reject invalid snapshots before either sink can delete anything."""
+    unique = {}
+    for entry in entries:
+        entry_id = str(entry.get("food_entry_id", "")).strip()
+        if not entry_id or len(entry_id) > 160:
+            raise ValueError("invalid_food_entry_id")
+        item = {"food_entry_id": entry_id,
+                "food_entry_name": str(entry.get("food_entry_name", "이름 없음")),
+                "meal": str(entry.get("meal", ""))}
+        if len(item["food_entry_name"]) > 2000:
+            raise ValueError("food_name_too_long")
+        for key, ceiling in [("calories", 10000), ("carbohydrate", 2000), ("protein", 2000), ("fat", 2000)]:
+            value = float(entry.get(key) or 0)
+            if not math.isfinite(value) or not 0 <= value <= ceiling:
+                raise ValueError("invalid_nutrition_value")
+            item[key] = round(value, 2)
+        if entry_id in unique and unique[entry_id] != item:
+            raise ValueError("conflicting_food_entry_id")
+        unique[entry_id] = item
+    if len(unique) > 200:
+        raise ValueError("snapshot_too_large")
+    return list(unique.values())
+
+
+def food_records(entries, day):
+    return [{"fatsecret_id": e["food_entry_id"], "date": day.isoformat(),
+             "food": e["food_entry_name"],
+             "meal": {"Breakfast": "아침", "Lunch": "점심", "Dinner": "저녁"}.get(e["meal"], "간식"),
+             "calories": e["calories"], "carbs": e["carbohydrate"],
+             "protein": e["protein"], "fat": e["fat"]} for e in entries]
 
 
 def entries_for(day):
@@ -75,7 +119,7 @@ def entries_for(day):
     raise RuntimeError("FatSecret food_entry 응답 형식이 올바르지 않습니다.")
 
 
-def notion_pages_for(day, database_id, date_property):
+def notion_pages_for(day, database_id, date_property, entry_id=None):
     pages, cursor = [], None
     while True:
         body = {
@@ -87,6 +131,8 @@ def notion_pages_for(day, database_id, date_property):
         }
         if cursor:
             body["start_cursor"] = cursor
+        if entry_id is not None:
+            body["filter"] = {"property": "FatSecretID", "rich_text": {"equals": entry_id}}
         r = requests.post(
             f"{NOTION_URL}/databases/{database_id}/query",
             headers=headers,
@@ -107,7 +153,7 @@ def fatsecret_id(page):
         .get("FatSecretID", {})
         .get("rich_text", [])
     )
-    return values[0].get("plain_text", "") if values else ""
+    return "".join(value.get("plain_text", value.get("text", {}).get("content", "")) for value in values)
 
 
 def raw_properties_for(entry, day):
@@ -188,21 +234,23 @@ def github_oidc_token():
     return token
 
 
-def sync_personal_os(days):
+def sync_personal_os(days, entries=None):
     response = requests.post(
         PERSONAL_OS_INGEST_URL,
         headers={
             "Authorization": f"Bearer {github_oidc_token()}",
             "Content-Type": "application/json",
         },
-        json={"days": days},
+        json={"days": days} if entries is None else {"snapshot": True, "days": days, "entries": entries},
         timeout=30,
     )
     response.raise_for_status()
     result = response.json()
     if not result.get("ok"):
         raise RuntimeError("Personal OS 동기화 응답이 올바르지 않습니다.")
-    print("Personal OS 동기화:", result.get("upserted", 0), "일")
+    print("Personal OS 동기화:", result.get("upserted", 0), "일",
+          "음식", result.get("upserted_entries", 0), "삭제", result.get("deleted_entries", 0))
+    return result
 
 
 def write_page(method, path, body):
@@ -238,8 +286,9 @@ def upsert_summary(day, entries):
     return "추가"
 
 
-def sync_day(day):
-    entries = entries_for(day)
+def sync_day(day, entries=None, protected_ids=None):
+    entries = normalize_entries(entries_for(day)) if entries is None else entries
+    protected_ids = protected_ids or set()
     pages = notion_pages_for(day, RAW_DB_ID, "Date")
 
     # FatSecretID를 고유 키로 사용합니다. 과거 중복 행이 있다면
@@ -265,6 +314,15 @@ def sync_day(day):
 
     for entry in entries:
         entry_id = str(entry["food_entry_id"])
+        # Look beyond this date: an edited/moved FatSecret record keeps its ID.
+        if entry_id not in existing:
+            matches = notion_pages_for(day, RAW_DB_ID, "Date", entry_id=entry_id)
+            if matches:
+                existing[entry_id] = matches[0]
+                for duplicate in matches[1:]:
+                    write_page("PATCH", f"/pages/{duplicate['id']}", {"archived": True})
+                    archived += 1
+                    time.sleep(0.4)
         if entry_id in existing:
             write_page(
                 "PATCH",
@@ -287,7 +345,7 @@ def sync_day(day):
     # API가 정상 응답했고 기존 Notion 행이 FatSecret에서 사라졌다면
     # 해당 행을 휴지통으로 이동합니다. 전체 음식 삭제도 반영됩니다.
     for entry_id, page in existing.items():
-        if entry_id not in current_ids:
+        if entry_id not in current_ids and entry_id not in protected_ids:
             write_page("PATCH", f"/pages/{page['id']}", {"archived": True})
             archived += 1
             time.sleep(0.4)
@@ -305,23 +363,40 @@ def sync_day(day):
 
 def main():
     totals = [0, 0, 0]
-    nutrition_days = []
+    failures = []
+    snapshots = []
+    today = datetime.now(LOCAL_TIMEZONE).date()
+    for offset in range(6, -1, -1):
+        day = today - timedelta(days=offset)
+        try:
+            snapshots.append((day, normalize_entries(entries_for(day))))
+        except Exception as exc:
+            failures.append(("FatSecret", day, type(exc).__name__))
+        time.sleep(0.3)
+
+    # Supabase is the first independent output. A Notion outage cannot block it.
+    for day, entries in snapshots:
+        try:
+            sync_personal_os([nutrition_totals(entries, day)], food_records(entries, day))
+        except Exception as exc:
+            failures.append(("Supabase", day, type(exc).__name__))
+
     try:
-        today = datetime.now(LOCAL_TIMEZONE).date()
-        for offset in range(6, -1, -1):
-            day = today - timedelta(days=offset)
-            print("확인:", day)
-            added, updated, archived, nutrition = sync_day(day)
-            totals = [a + b for a, b in zip(totals, (added, updated, archived))]
-            nutrition_days.append(nutrition)
-            time.sleep(0.3)
-        sync_personal_os(nutrition_days)
+        configure_notion()
     except Exception as exc:
-        print("동기화 실패: 인증값과 응답 본문은 출력하지 않았습니다.")
-        print("오류 종류:", type(exc).__name__)
-        if isinstance(exc, requests.HTTPError) and exc.response is not None:
-            print("실패 서비스:", urlparse(exc.response.url).hostname)
-            print("HTTP 상태:", exc.response.status_code)
+        failures.append(("Notion 설정", None, type(exc).__name__))
+    else:
+        protected_ids = {e["food_entry_id"] for _, entries in snapshots for e in entries}
+        for day, entries in snapshots:
+            try:
+                added, updated, archived, _ = sync_day(day, entries, protected_ids)
+                totals = [a + b for a, b in zip(totals, (added, updated, archived))]
+            except Exception as exc:
+                failures.append(("Notion", day, type(exc).__name__))
+    if failures:
+        for service, day, kind in failures:
+            print(f"재시도 필요: 서비스={service} 날짜={day} 종류={kind}")
+        print("인증값·응답 본문은 출력하지 않습니다. 다음 실행에서 재시도합니다.")
         raise SystemExit(1)
 
     print(
